@@ -1,0 +1,270 @@
+package mapreduce;
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.concurrent.Semaphore;
+
+public class Main {
+
+	/**
+	 * Keeps track of line number and word number. "Value" that this map/reduce
+	 * is keeping track of.
+	 */
+	public static class LineWordLocation {
+		private final String word;//the word
+		private final int lineNumber;//the line number you found the word
+		private final int wordNumber;//the number in the line
+		private final String fileName;//the file in which you foudnt he word
+
+		public LineWordLocation(String word, int lineNumber, int wordNumber,
+				String fileName) {
+			this.word = word;
+			this.lineNumber = lineNumber;
+			this.wordNumber = wordNumber;
+			this.fileName = fileName;
+		}
+
+		public int getLineNumber() {
+			return lineNumber;
+		}
+
+		public int getWordNumber() {
+			return wordNumber;
+		}
+
+		public String getFileName() {
+			return fileName;
+		}
+
+		public String getWord() {
+			return word;
+		}
+	}
+
+	/**
+	 * A Comparator for LineWordLocations that compares the fileName field
+	 * inside the LineWordLocation.
+	 */
+	public static class LineWordLocationComparator implements
+			Comparator<LineWordLocation> {
+		@Override
+		public int compare(LineWordLocation arg0, LineWordLocation arg1) {
+			return arg0.getFileName().compareTo(arg1.getFileName());
+		}
+
+	}
+
+	public static void main(String[] args) throws IOException,
+			InterruptedException {
+
+		int numMapThreads = args.length - 1;
+
+		Semaphore mapSemaphore = new Semaphore(-numMapThreads + 1);//semaphore for the mapping threads is incremented by one or else it would only reach 0
+		Semaphore addToMasterListSemaphore = new Semaphore(1);
+
+		// read files
+		List<List<LineWordLocation>> mappedOutputs = new ArrayList<List<LineWordLocation>>();//holds the values of the outputs
+
+		// "Map"
+		for (int i = 1; i < args.length; i++) {
+			new Mapper(args[i], mappedOutputs, mapSemaphore,
+					addToMasterListSemaphore).start();
+		}
+
+		mapSemaphore.acquire();//halts the program until the map is complete
+
+		// Master combined map
+		Map<String, List<LineWordLocation>> combinedMap = new HashMap<String, List<LineWordLocation>>();
+
+		// "Combine"
+		for (List<LineWordLocation> mappedOutput : mappedOutputs) {
+			for (LineWordLocation lineWordLocation : mappedOutput) {
+				String word = lineWordLocation.getWord();
+
+				List<LineWordLocation> combinedLineWordLocations;
+				if (combinedMap.containsKey(word)) {//if the arraylist already exsits it just adds to the arraylist
+					combinedLineWordLocations = combinedMap.get(word);
+				} else {//if the arraylist does not exist it creates a new arraylist
+					combinedLineWordLocations = new ArrayList<LineWordLocation>();
+				}
+				combinedLineWordLocations.add(lineWordLocation);
+				combinedMap.put(word, combinedLineWordLocations);//adds or replaces the current value with the updated values
+			}
+		}
+
+		int numReduceThreads = Integer.parseInt(args[0]);
+
+		Semaphore mapLock = new Semaphore(1);//the lock for the map
+		Semaphore outputLock = new Semaphore(1);//the lock for the output
+		Semaphore reduceSemaphore = new Semaphore(-numReduceThreads + 1);
+
+		List<String> outputs = new ArrayList<String>();//the list of outputs
+
+		// "Reduce"
+		for (int i = 0; i < numReduceThreads; i++) {
+			new Reducer(combinedMap, outputs, mapLock, outputLock,
+					reduceSemaphore).start();
+		}
+
+		reduceSemaphore.acquire();
+
+		// Sort and print
+		Collections.sort(outputs);
+		for (String output : outputs) {
+			System.out.println(output);
+		}
+	}
+
+	/**
+	 * Reduce combined inputs <String, List<LineWordLocation>> -> <word, string
+	 * representation of the occurrences of the word>
+	 */
+	public static final class Reducer extends Thread {
+
+		private Map<String, List<LineWordLocation>> combinedMap;
+		private final Semaphore mapLock;//the lock for the map
+		private final List<String> outputs;//the list of outputs in String to make it easy to print
+		private final Semaphore outputLock;//the output lock
+		private final Semaphore reduceSemaphore;//reducesemaphores lock
+
+		public Reducer(Map<String, List<LineWordLocation>> combinedMap,
+				List<String> outputs, Semaphore mapLock, Semaphore outputLock,
+				Semaphore reduceSemaphore) {
+			this.combinedMap = combinedMap;
+			this.mapLock = mapLock;
+			this.outputs = outputs;
+			this.reduceSemaphore = reduceSemaphore;
+			this.outputLock = outputLock;
+		}
+
+		public void run() {
+			try {
+				while (true) {
+					mapLock.acquire();
+					if (combinedMap.size() == 0) {
+						mapLock.release();
+						reduceSemaphore.release();//releases the reducesemaphore lock once it is done adding to the output/ has no more inputs
+						return;
+					} else {
+						Entry<String, List<LineWordLocation>> input = combinedMap
+								.entrySet().iterator().next();
+						combinedMap.remove(input.getKey());
+						mapLock.release();
+
+						String output = reduce(input);
+						outputLock.acquire();//grabs the lock for the out put
+						outputs.add(output);//adds to the output
+						outputLock.release();//releases the lock
+					}
+				}
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+		}
+
+		private static String reduce(Entry<String, List<LineWordLocation>> input) {
+			Collections
+					.sort(input.getValue(), new LineWordLocationComparator());
+
+			StringBuilder toPrint = new StringBuilder();
+			toPrint.append(input.getKey());
+			String currentFileName = null;
+
+			for (LineWordLocation lineWordLocation : input.getValue()) {
+				if (currentFileName == null
+						|| !lineWordLocation.getFileName().equals(
+								currentFileName)) {//if it is a new word it must include the word
+					currentFileName = lineWordLocation.getFileName();
+					toPrint.append(" ");
+					toPrint.append(lineWordLocation.getFileName());
+					toPrint.append("@");
+					toPrint.append(lineWordLocation.getLineNumber());
+					toPrint.append(",");
+				} else {//if it is the same word this is only the location where it was found
+					toPrint.append(lineWordLocation.getLineNumber());
+					toPrint.append(",");
+				}
+			}
+
+			return toPrint.toString();
+		}
+	}
+
+	/**
+	 * Maps lines in @param fileName to <LineWordLocation, LineWordLocation>
+	 * 
+	 * @throws IOException
+	 */
+	public static class Mapper extends Thread {
+
+		private final String fileName;//the file number/name
+		private final Semaphore mapSemaphore;//the mapsemaphore lock
+		private final List<List<LineWordLocation>> mappedOutputs;//the list of outputs
+		private final Semaphore addToMasterListSemaphore;//the semaphore to add to the masterlist
+
+		public Mapper(String fileName,
+				List<List<LineWordLocation>> mappedOutputs,
+				Semaphore mapSemaphore, Semaphore addToMasterListSemaphore) {
+			this.fileName = fileName;
+			this.mapSemaphore = mapSemaphore;
+			this.mappedOutputs = mappedOutputs;
+			this.addToMasterListSemaphore = addToMasterListSemaphore;
+		}
+
+		public void run() {
+			List<LineWordLocation> mappedOutput = map();
+
+			try {
+				addToMasterListSemaphore.acquire();
+				mappedOutputs.add(mappedOutput);
+				addToMasterListSemaphore.release();
+
+				mapSemaphore.release();
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+		}
+
+		private List<LineWordLocation> map() {
+
+			List<LineWordLocation> mappedOutput = new ArrayList<LineWordLocation>();
+
+			try {
+				BufferedReader br = new BufferedReader(new FileReader(fileName));
+
+				// counter to keep track of the line number
+				int lineNumber = 0;
+
+				String line = br.readLine();
+				while (line != null) {
+
+					line = line.replaceAll("[^A-Za-z0-9 ]", "").toLowerCase();//eliminates punctuation
+
+					String[] words = line.split(" ");//splits all string into seporate values in the array by spaces
+
+					for (int wordNumber = 0; wordNumber < words.length; wordNumber++) {
+						LineWordLocation lineWordLocation = new LineWordLocation(
+								words[wordNumber], lineNumber, wordNumber,
+								fileName);
+						mappedOutput.add(lineWordLocation);
+					}
+
+					line = br.readLine();
+					lineNumber++;
+				}
+				br.close();
+				return mappedOutput;
+			} catch (IOException e) {
+				throw new RuntimeException("Can't read files");
+			}
+		}
+	}
+}
