@@ -1,0 +1,31 @@
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.Scanner;
+
+
+public class JavaShell {
+
+	public static void main(String[] args) throws IOException {
+		
+
+		BufferedReader scan = new BufferedReader(new InputStreamReader(System.in));//used to read user input because scanner only read first word
+		String y = "";//declaration of y used for users command
+		
+		while(!y.equals("q")){//keeps going as long as the user does not quit
+			
+			System.out.print("mysh> ");//displays the mysh form the description
+			y = scan.readLine();//reads line
+
+		//	System.out.println(y);//used for testing
+			
+			Process p = Runtime.getRuntime().exec(y);//calls runtime's exec method
+			BufferedReader in = new BufferedReader(new InputStreamReader(p.getInputStream()));
+
+			String line = null;
+			while ((line = in.readLine()) != null) {
+				System.out.println(line);//prints while there is somehting left to print
+			}
+        }
+	}	
+}
